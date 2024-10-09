@@ -120,6 +120,7 @@ client *createClient(connection *conn) {
         connEnableTcpNoDelay(conn);
         if (server.tcpkeepalive)
             connKeepAlive(conn,server.tcpkeepalive);
+        // 创建IO读事件，对应的事件处理函数为readQueryFromClient
         connSetReadHandler(conn, readQueryFromClient);
         connSetPrivateData(conn, c);
     }
@@ -1358,6 +1359,7 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
     }
 
     /* Create connection and client */
+    // 创建Client，并创建IO事件
     if ((c = createClient(conn)) == NULL) {
         char addr[NET_ADDR_STR_LEN] = {0};
         char laddr[NET_ADDR_STR_LEN] = {0};
@@ -2659,8 +2661,9 @@ void readQueryFromClient(connection *conn) {
 
     /* Check if we want to read from the client later when exiting from
      * the event loop. This is the case if threaded I/O is enabled. */
+    //  6.0新增逻辑，用于将IO读事件放入队列，返回1表示加入成功，直接return。
     if (postponeClientRead(c)) return;
-
+    // 返回0，表示没有开启多线程IO或其他场景，直接由主线程处理命令。
     /* Update total number of reads on server */
     atomicIncr(server.stat_total_reads_processed, 1);
 
@@ -4255,14 +4258,16 @@ void *IOThreadMain(void *myid) {
     redis_set_thread_title(thdname);
     redisSetCpuAffinity(server.server_cpulist);
     makeThreadKillable();
-
+    // IO线程要一直处理事件，所以需要while(1)自旋
     while(1) {
         /* Wait for start */
+        // 自旋100000次，每次判断是否存在Pending状态的IO事件。
         for (int j = 0; j < 1000000; j++) {
             if (getIOPendingCount(id) != 0) break;
         }
 
         /* Give the main thread a chance to stop this thread. */
+        // 如果自旋了100000次判断，还是没有IO事件，尝试获取锁，由于锁此时已经被Main Thread获取，所以此时IO Thread会阻塞。
         if (getIOPendingCount(id) == 0) {
             pthread_mutex_lock(&io_threads_mutex[id]);
             pthread_mutex_unlock(&io_threads_mutex[id]);
@@ -4275,6 +4280,7 @@ void *IOThreadMain(void *myid) {
          * before we drop the pending count to 0. */
         listIter li;
         listNode *ln;
+        // 迭代io_threads_list,IO Thread只做两个操作：writeToClient / readQueryFromClient 
         listRewind(io_threads_list[id],&li);
         while((ln = listNext(&li))) {
             client *c = listNodeValue(ln);
@@ -4286,6 +4292,7 @@ void *IOThreadMain(void *myid) {
                 serverPanic("io_threads_op value is unknown");
             }
         }
+        // 完成之后，清空该客户端列表。
         listEmpty(io_threads_list[id]);
         setIOPendingCount(id, 0);
     }
@@ -4316,9 +4323,10 @@ void initThreadedIO(void) {
 
         /* Things we do only for the additional threads. */
         pthread_t tid;
-        pthread_mutex_init(&io_threads_mutex[i],NULL);
+        pthread_mutex_init(&io_threads_mutex[i],NULL); // 互斥锁 
         setIOPendingCount(i, 0);
         pthread_mutex_lock(&io_threads_mutex[i]); /* Thread will be stopped. */
+        // 创建IO线程，并执行IOThreadMain函数。类似于Java中的new Thread(IOTreadMain)
         if (pthread_create(&tid,NULL,IOThreadMain,(void*)(long)i) != 0) {
             serverLog(LL_WARNING,"Fatal: Can't initialize IO thread.");
             exit(1);
@@ -4494,7 +4502,8 @@ int postponeClientRead(client *c) {
         !ProcessingEventsWhileBlocked &&
         !(c->flags & (CLIENT_MASTER|CLIENT_SLAVE|CLIENT_BLOCKED)) &&
         io_threads_op == IO_THREADS_OP_IDLE)
-    {
+    {   
+        // 将IO读事件加入clients_pending_read队列中。
         listAddNodeHead(server.clients_pending_read,c);
         c->pending_read_list_node = listFirst(server.clients_pending_read);
         return 1;

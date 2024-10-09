@@ -61,6 +61,7 @@ aeEventLoop *aeCreateEventLoop(int setsize) {
     eventLoop->beforesleep = NULL;
     eventLoop->aftersleep = NULL;
     eventLoop->flags = 0;
+    // 初始化epoll相关API
     if (aeApiCreate(eventLoop) == -1) goto err;
     /* Events with mask == AE_NONE are not set. So let's initialize the
      * vector with it. */
@@ -140,6 +141,7 @@ void aeStop(aeEventLoop *eventLoop) {
     eventLoop->stop = 1;
 }
 
+// 创建文件事件，很多地方会调用该函数，如connSocketSetReadHandler，创建了一个Socket的读事件
 int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
         aeFileProc *proc, void *clientData)
 {
@@ -339,6 +341,7 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
  * if flags has AE_CALL_BEFORE_SLEEP set, the beforesleep callback is called.
  *
  * The function returns the number of events processed. */
+//  核心函数，用于处理所有类型的事件。
 int aeProcessEvents(aeEventLoop *eventLoop, int flags)
 {
     int processed = 0, numevents;
@@ -377,6 +380,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
         }
         /* Call the multiplexing API, will return only on timeout or when
          * some event fires. */
+        // aeApiPoll会返回触发的事件数。
         numevents = aeApiPoll(eventLoop, tvp);
 
         /* Don't process file events if not requested. */
@@ -413,6 +417,8 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
              *
              * Fire the readable event if the call sequence is not
              * inverted. */
+
+            // 处理读事件，rfileProc是个函数指针，指向不同的事件处理函数，如：readQueryFromClient ， syncWithMaster ， clusterReadHandler
             if (!invert && fe->mask & mask & AE_READABLE) {
                 fe->rfileProc(eventLoop,fd,fe->clientData,mask);
                 fired++;
@@ -420,6 +426,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             }
 
             /* Fire the writable event. */
+            // 处理写事件
             if (fe->mask & mask & AE_WRITABLE) {
                 if (!fired || fe->wfileProc != fe->rfileProc) {
                     fe->wfileProc(eventLoop,fd,fe->clientData,mask);
@@ -473,6 +480,7 @@ int aeWait(int fd, int mask, long long milliseconds) {
 
 void aeMain(aeEventLoop *eventLoop) {
     eventLoop->stop = 0;
+    // 在循环中处理事件
     while (!eventLoop->stop) {
         aeProcessEvents(eventLoop, AE_ALL_EVENTS|
                                    AE_CALL_BEFORE_SLEEP|
